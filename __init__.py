@@ -4,7 +4,7 @@
 import bpy
 import math
 from bpy.props import EnumProperty, StringProperty, FloatProperty, BoolProperty, PointerProperty
-from bpy.types import PropertyGroup
+from bpy.types import PropertyGroup, Operator
 
 # --- Utility Functions ---
 def get_frame_rate(scene):
@@ -27,12 +27,11 @@ def apply_shutter(scene):
     addon_props = scene.shutter_control
     if not addon_props.is_active or not scene.render.use_motion_blur:
         return
-        
     try:
         if addon_props.mode == "SPEED":
             shutter_seconds = parse_shutter_speed_string(addon_props.speed)
             shutter_fraction = shutter_seconds * get_frame_rate(scene)
-        else:  # ANGLE mode
+        else:
             shutter_fraction = addon_props.angle / 360.0
     except (ValueError, TypeError):
         return
@@ -42,6 +41,23 @@ def update_shutter(self, context):
     if context.scene:
         apply_shutter(context.scene)
 
+# --- refresh button ---
+class SHUTTER_CONTROL_OT_refresh(Operator):
+    """Recalculates the shutter value using the current scene FPS"""
+    bl_idname = "scene.shutter_control_refresh"
+    bl_label = "Refresh Shutter Calculation"
+
+    @classmethod
+    def poll(cls, context):
+        # Only allow the button to be clicked if the addon control is active
+        return context.scene and context.scene.shutter_control.is_active
+
+    def execute(self, context):
+        apply_shutter(context.scene)
+        self.report({'INFO'}, "Shutter value recalculated with current FPS.")
+        return {'FINISHED'}
+
+# --- Property Group ---
 class ShutterControlSettings(PropertyGroup):
     is_active: BoolProperty(
         name="Enable Camera Shutter Control",
@@ -73,6 +89,7 @@ class ShutterControlSettings(PropertyGroup):
         options=set()
     )
 
+
 # --- Base Panel for UI ---
 class SHUTTER_CONTROL_PT_base(bpy.types.Panel):
     bl_label = "" 
@@ -94,24 +111,20 @@ class SHUTTER_CONTROL_PT_base(bpy.types.Panel):
         scene = context.scene
         addon_props = scene.shutter_control
         rd = scene.render
-        
         layout.active = addon_props.is_active and rd.use_motion_blur
         layout.use_property_split = True
-        
         main_col = layout.column(align=True)
-        
         row = main_col.row()
         row.prop(addon_props, "mode", expand=True)
-        
         if addon_props.mode == "SPEED":
             main_col.prop(addon_props, "speed")
-        else: # ANGLE
+        else:
             main_col.prop(addon_props, "angle")
-        
         main_col.separator()
-        
         col = main_col.column(heading="Frame Rate")
         
+        ui_row = col.row(align=True)
+
         format_panel = getattr(bpy.types, "RENDER_PT_format", None)
         preset_menu = getattr(bpy.types, "RENDER_MT_framerate_presets", None)
         label_text = f"{get_frame_rate(scene):.2f} FPS"
@@ -123,7 +136,9 @@ class SHUTTER_CONTROL_PT_base(bpy.types.Panel):
             except Exception:
                 pass
         
-        col.menu("RENDER_MT_framerate_presets", text=label_text)
+        ui_row.menu("RENDER_MT_framerate_presets", text=label_text)
+
+        ui_row.operator(SHUTTER_CONTROL_OT_refresh.bl_idname, icon='FILE_REFRESH', text="")
         
         if show_custom_ui:
             sub_col = col.column(align=True)
@@ -133,23 +148,15 @@ class SHUTTER_CONTROL_PT_base(bpy.types.Panel):
 # --- Registration ---
 classes = (
     ShutterControlSettings,
-    # The base panel is not registered itself, but its children are.
+    SHUTTER_CONTROL_OT_refresh, # Add the new operator class
 )
 panel_classes = []
 
 def register():
     for cls in classes:
         bpy.utils.register_class(cls)
-
-    # Add a single PointerProperty to the Scene
     bpy.types.Scene.shutter_control = PointerProperty(type=ShutterControlSettings)
-
-    parent_panels = {
-        'CYCLES': 'CYCLES_RENDER_PT_motion_blur',
-        'BLENDER_EEVEE': 'RENDER_PT_eevee_motion_blur',
-        'BLENDER_EEVEE_NEXT': 'RENDER_PT_eevee_next_motion_blur',
-    }
-
+    parent_panels = {'CYCLES': 'CYCLES_RENDER_PT_motion_blur','BLENDER_EEVEE': 'RENDER_PT_eevee_motion_blur','BLENDER_EEVEE_NEXT': 'RENDER_PT_eevee_next_motion_blur',}
     for engine_id, parent_id in parent_panels.items():
         if getattr(bpy.types, parent_id, None) is None:
             continue
@@ -166,9 +173,6 @@ def unregister():
     for cls in reversed(panel_classes):
         bpy.utils.unregister_class(cls)
     panel_classes.clear()
-
-    # Delete the PointerProperty
     del bpy.types.Scene.shutter_control
-
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
