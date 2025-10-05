@@ -3,18 +3,16 @@
 
 import bpy
 import math
-from bpy.props import EnumProperty, StringProperty, FloatProperty, BoolProperty
-from bpy.app.handlers import persistent
+from bpy.props import EnumProperty, StringProperty, FloatProperty, BoolProperty, PointerProperty
+from bpy.types import PropertyGroup
 
 # --- Utility Functions ---
 def get_frame_rate(scene):
-    """Calculate the final frame rate from fps and fps_base."""
     fps = scene.render.fps
     base = scene.render.fps_base if scene.render.fps_base != 0 else 1.0
     return fps / base
 
 def parse_shutter_speed_string(s: str) -> float:
-    """Parse shutter speed input like '1/125' or '0.008' into seconds."""
     s = s.strip().lower().replace("s", "")
     if "/" in s:
         try:
@@ -24,31 +22,56 @@ def parse_shutter_speed_string(s: str) -> float:
             raise ValueError("Invalid fraction format")
     return float(s)
 
-# --- Core Logic & Callbacks ---
+# --- Core Logic & Callback ---
 def apply_shutter(scene):
-    """Compute and apply motion blur shutter value."""
-    if not scene or not scene.shutter_control_is_active or not scene.render.use_motion_blur:
+    addon_props = scene.shutter_control
+    if not addon_props.is_active or not scene.render.use_motion_blur:
         return
         
     try:
-        if scene.shutter_control_mode == "SPEED":
-            shutter_seconds = parse_shutter_speed_string(scene.shutter_control_speed)
+        if addon_props.mode == "SPEED":
+            shutter_seconds = parse_shutter_speed_string(addon_props.speed)
             shutter_fraction = shutter_seconds * get_frame_rate(scene)
         else:  # ANGLE mode
-            shutter_fraction = scene.shutter_control_angle / 360.0
+            shutter_fraction = addon_props.angle / 360.0
     except (ValueError, TypeError):
         return
     scene.render.motion_blur_shutter = max(0.0, shutter_fraction)
 
-@persistent
-def on_depsgraph_update(scene, depsgraph):
-    """Handler to react to scene changes like FPS updates."""
-    apply_shutter(scene)
-
 def update_shutter(self, context):
-    """Callback for when the addon's own properties are changed."""
     if context.scene:
         apply_shutter(context.scene)
+
+class ShutterControlSettings(PropertyGroup):
+    is_active: BoolProperty(
+        name="Enable Camera Shutter Control",
+        description="Globally enable or disable this addon's automatic calculations",
+        default=True,
+        update=update_shutter
+    )
+    mode: EnumProperty(
+        name="Mode",
+        description="Select how to define shutter duration",
+        items=[("SPEED", "Speed", "Use seconds like 1/48s"),("ANGLE", "Angle", "Use degrees like 180°")],
+        default="ANGLE",
+        update=update_shutter,
+        options=set()
+    )
+    speed: StringProperty(
+        name="Shutter Speed (s)",
+        description="Enter an absolute shutter time, e.g., '1/48' for video or '2s' for a still photo",
+        default="1/48",
+        update=update_shutter
+    )
+    angle: FloatProperty(
+        name="Shutter Angle (°)",
+        description="Shutter angle in degrees (0–360)",
+        min=0.0,
+        max=360.0,
+        default=180.0,
+        update=update_shutter,
+        options=set()
+    )
 
 # --- Base Panel for UI ---
 class SHUTTER_CONTROL_PT_base(bpy.types.Panel):
@@ -60,31 +83,30 @@ class SHUTTER_CONTROL_PT_base(bpy.types.Panel):
     
     @classmethod
     def poll(cls, context):
-        # --- CHANGE: Always return True to ensure the panel header is always visible. ---
         return True
 
     def draw_header(self, context):
-        scene = context.scene
-        self.layout.prop(scene, "shutter_control_is_active", text="Camera Shutter Control")
+        addon_props = context.scene.shutter_control
+        self.layout.prop(addon_props, "is_active", text="Camera Shutter Control")
 
     def draw(self, context):
         layout = self.layout
         scene = context.scene
+        addon_props = scene.shutter_control
         rd = scene.render
         
-        # --- CHANGE: Gray out the UI if the master switch OR global motion blur is off. ---
-        layout.active = scene.shutter_control_is_active and rd.use_motion_blur
+        layout.active = addon_props.is_active and rd.use_motion_blur
         layout.use_property_split = True
         
         main_col = layout.column(align=True)
         
         row = main_col.row()
-        row.prop(scene, "shutter_control_mode", expand=True)
+        row.prop(addon_props, "mode", expand=True)
         
-        if scene.shutter_control_mode == "SPEED":
-            main_col.prop(scene, "shutter_control_speed")
+        if addon_props.mode == "SPEED":
+            main_col.prop(addon_props, "speed")
         else: # ANGLE
-            main_col.prop(scene, "shutter_control_angle")
+            main_col.prop(addon_props, "angle")
         
         main_col.separator()
         
@@ -109,17 +131,18 @@ class SHUTTER_CONTROL_PT_base(bpy.types.Panel):
             sub_col.prop(rd, "fps_base", text="Base")
 
 # --- Registration ---
+classes = (
+    ShutterControlSettings,
+    # The base panel is not registered itself, but its children are.
+)
 panel_classes = []
 
 def register():
-    """Register all parts of the addon."""
-    bpy.types.Scene.shutter_control_is_active = BoolProperty(name="Enable Camera Shutter Control",description="Globally enable or disable this addon's automatic calculations",default=True,update=update_shutter)
-    bpy.types.Scene.shutter_control_mode = EnumProperty(name="Mode",description="Select how to define shutter duration",items=[("SPEED", "Speed", "Use seconds like 1/48s"),("ANGLE", "Angle", "Use degrees like 180°")],default="ANGLE",update=update_shutter,options=set())
-    bpy.types.Scene.shutter_control_speed = StringProperty(name="Shutter Speed (s)",description="Enter an absolute shutter time, e.g., '1/48' for video or '2s' for a still photo",default="1/48",update=update_shutter)
-    bpy.types.Scene.shutter_control_angle = FloatProperty(name="Shutter Angle (°)",description="Shutter angle in degrees (0–360)",min=0.0,max=360.0,default=180.0,update=update_shutter,options=set())
+    for cls in classes:
+        bpy.utils.register_class(cls)
 
-    if on_depsgraph_update not in bpy.app.handlers.depsgraph_update_post:
-        bpy.app.handlers.depsgraph_update_post.append(on_depsgraph_update)
+    # Add a single PointerProperty to the Scene
+    bpy.types.Scene.shutter_control = PointerProperty(type=ShutterControlSettings)
 
     parent_panels = {
         'CYCLES': 'CYCLES_RENDER_PT_motion_blur',
@@ -140,15 +163,12 @@ def register():
         panel_classes.append(new_panel)
 
 def unregister():
-    """Unregister all parts of the addon."""
-    if on_depsgraph_update in bpy.app.handlers.depsgraph_update_post:
-        bpy.app.handlers.depsgraph_update_post.remove(on_depsgraph_update)
-        
-    for cls in panel_classes:
+    for cls in reversed(panel_classes):
         bpy.utils.unregister_class(cls)
     panel_classes.clear()
-    
-    props = ("shutter_control_mode", "shutter_control_speed", "shutter_control_angle", "shutter_control_is_active")
-    for p in props:
-        if hasattr(bpy.types.Scene, p):
-            delattr(bpy.types.Scene, p)
+
+    # Delete the PointerProperty
+    del bpy.types.Scene.shutter_control
+
+    for cls in reversed(classes):
+        bpy.utils.unregister_class(cls)
